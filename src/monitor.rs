@@ -183,6 +183,7 @@ pub struct LimitsConfigOverview {
     pub default_member_weekly_quota: i64,
     pub default_upstream_concurrency: i64,
     pub ws_idle_timeout_secs: u64,
+    pub ws_upstream_ping_interval_secs: u64,
     pub ws_max_connection_secs: u64,
     pub ws_max_messages_per_connection: i64,
 }
@@ -652,6 +653,7 @@ fn config_overview(state: &AppState) -> ConfigOverview {
             default_member_weekly_quota: state.config.limits.default_member_weekly_quota,
             default_upstream_concurrency: state.config.limits.default_upstream_concurrency,
             ws_idle_timeout_secs: state.config.limits.ws_idle_timeout_secs,
+            ws_upstream_ping_interval_secs: state.config.limits.ws_upstream_ping_interval_secs,
             ws_max_connection_secs: state.config.limits.ws_max_connection_secs,
             ws_max_messages_per_connection: state.config.limits.ws_max_messages_per_connection,
         },

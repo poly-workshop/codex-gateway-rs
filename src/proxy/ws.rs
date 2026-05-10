@@ -10,10 +10,14 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::time::timeout;
+use tokio::time::{MissedTickBehavior, interval, timeout};
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{self, client::IntoClientRequest},
+    tungstenite::{
+        self,
+        client::IntoClientRequest,
+        protocol::{CloseFrame as TungsteniteCloseFrame, frame::coding::CloseCode},
+    },
 };
 use url::Url;
 
@@ -151,8 +155,16 @@ async fn handle_ws(
     let (mut client_tx, mut client_rx) = client_socket.split();
     let (mut upstream_tx, mut upstream_rx) = upstream.split();
     let idle_timeout = Duration::from_secs(state.config.limits.ws_idle_timeout_secs);
+    let ping_interval = Duration::from_secs(state.config.limits.ws_upstream_ping_interval_secs);
     let max_connection = Duration::from_secs(state.config.limits.ws_max_connection_secs);
     let max_messages = state.config.limits.ws_max_messages_per_connection;
+    let mut upstream_ping = if ping_interval.is_zero() {
+        None
+    } else {
+        let mut interval = interval(ping_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        Some(interval)
+    };
 
     let close_reason = loop {
         if started.elapsed() >= max_connection {
@@ -161,6 +173,9 @@ async fn handle_ws(
                     code: axum::extract::ws::close_code::POLICY,
                     reason: "maximum connection duration reached".into(),
                 })))
+                .await;
+            let _ = upstream_tx
+                .send(tungstenite_close("maximum connection duration reached"))
                 .await;
             break "max_connection_duration".to_string();
         }
@@ -171,6 +186,9 @@ async fn handle_ws(
                     reason: "maximum message count reached".into(),
                 })))
                 .await;
+            let _ = upstream_tx
+                .send(tungstenite_close("maximum message count reached"))
+                .await;
             break "max_messages".to_string();
         }
 
@@ -178,6 +196,13 @@ async fn handle_ws(
             tokio::select! {
                 from_client = client_rx.next() => WsEvent::Client(from_client),
                 from_upstream = upstream_rx.next() => WsEvent::Upstream(from_upstream),
+                _ = async {
+                    if let Some(upstream_ping) = upstream_ping.as_mut() {
+                        upstream_ping.tick().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => WsEvent::UpstreamPing,
             }
         })
         .await;
@@ -231,11 +256,26 @@ async fn handle_ws(
                 }
             }
             Ok(WsEvent::Upstream(Some(Err(error)))) => {
+                if is_unclean_ws_reset(&error) {
+                    break "upstream_reset".to_string();
+                }
                 mark_failure(&state, upstream_id, "ws_upstream_error").await;
                 break format!("upstream_error:{error}");
             }
             Ok(WsEvent::Upstream(None)) => {
                 break "upstream_closed".to_string();
+            }
+            Ok(WsEvent::UpstreamPing) => {
+                if let Err(error) = upstream_tx
+                    .send(tungstenite::Message::Ping(Vec::new().into()))
+                    .await
+                {
+                    if is_unclean_ws_reset(&error) {
+                        break "upstream_reset".to_string();
+                    }
+                    mark_failure(&state, upstream_id, "ws_ping_error").await;
+                    break format!("upstream_ping_error:{error}");
+                }
             }
             Err(_) => {
                 let _ = client_tx
@@ -244,6 +284,7 @@ async fn handle_ws(
                         reason: "idle timeout".into(),
                     })))
                     .await;
+                let _ = upstream_tx.send(tungstenite_close("idle timeout")).await;
                 break "idle_timeout".to_string();
             }
         }
@@ -260,7 +301,8 @@ async fn handle_ws(
             status_code: None,
             success: close_reason == "normal"
                 || close_reason == "client_closed"
-                || close_reason == "upstream_closed",
+                || close_reason == "upstream_closed"
+                || close_reason == "upstream_reset",
             usage,
             cost_weight,
             request_count: 0,
@@ -285,6 +327,7 @@ async fn handle_ws(
 enum WsEvent {
     Client(Option<std::result::Result<Message, axum::Error>>),
     Upstream(Option<std::result::Result<tungstenite::Message, tungstenite::Error>>),
+    UpstreamPing,
 }
 
 async fn mark_failure(state: &AppState, upstream_id: i64, reason: &str) {
@@ -321,6 +364,22 @@ fn is_retryable_ws_connect_error(error: &tungstenite::Error) -> bool {
         }
         _ => true,
     }
+}
+
+fn is_unclean_ws_reset(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::Protocol(tungstenite::error::ProtocolError::ResetWithoutClosingHandshake)
+            | tungstenite::Error::ConnectionClosed
+            | tungstenite::Error::AlreadyClosed
+    )
+}
+
+fn tungstenite_close(reason: &'static str) -> tungstenite::Message {
+    tungstenite::Message::Close(Some(TungsteniteCloseFrame {
+        code: CloseCode::Away,
+        reason: reason.into(),
+    }))
 }
 
 fn axum_to_tungstenite(message: Message) -> Option<tungstenite::Message> {

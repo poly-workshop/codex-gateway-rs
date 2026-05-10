@@ -840,6 +840,12 @@ function ConfigPanel({ config }: { config: ConfigOverview }) {
             formatNumber(config.limits.defaultUpstreamConcurrency),
           ],
           ["WS idle timeout", `${config.limits.wsIdleTimeoutSecs}s`],
+          [
+            "WS upstream ping",
+            config.limits.wsUpstreamPingIntervalSecs
+              ? `${config.limits.wsUpstreamPingIntervalSecs}s`
+              : "disabled",
+          ],
           ["WS max connection", `${config.limits.wsMaxConnectionSecs}s`],
           [
             "WS max messages",

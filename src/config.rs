@@ -59,6 +59,7 @@ pub struct LimitsConfig {
     pub default_member_weekly_quota: i64,
     pub default_upstream_concurrency: i64,
     pub ws_idle_timeout_secs: u64,
+    pub ws_upstream_ping_interval_secs: u64,
     pub ws_max_connection_secs: u64,
     pub ws_max_messages_per_connection: i64,
 }
@@ -122,6 +123,7 @@ impl Default for LimitsConfig {
             default_member_weekly_quota: 0,
             default_upstream_concurrency: 8,
             ws_idle_timeout_secs: 120,
+            ws_upstream_ping_interval_secs: 20,
             ws_max_connection_secs: 3_600,
             ws_max_messages_per_connection: 5_000,
         }

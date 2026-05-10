@@ -201,6 +201,7 @@ default_member_5h_quota = 0
 default_member_weekly_quota = 0
 default_upstream_concurrency = 8
 ws_idle_timeout_secs = 120
+ws_upstream_ping_interval_secs = 20
 ws_max_connection_secs = 3600
 ws_max_messages_per_connection = 5000
 "#

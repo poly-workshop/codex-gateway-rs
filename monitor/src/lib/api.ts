@@ -126,6 +126,7 @@ export type ConfigOverview = {
     defaultMemberWeeklyQuota: number
     defaultUpstreamConcurrency: number
     wsIdleTimeoutSecs: number
+    wsUpstreamPingIntervalSecs: number
     wsMaxConnectionSecs: number
     wsMaxMessagesPerConnection: number
   }
