@@ -869,7 +869,14 @@ function EventsTable({ events }: { events: UsageEventOverview[] }) {
                       }
                     />
                   </TableCell>
-                  <TableCell>{formatCredits(event.credits)}</TableCell>
+                  <TableCell>
+                    <div className="flex min-w-24 flex-col gap-1">
+                      <span>{formatCredits(event.credits)}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {event.usagePrecision}
+                      </span>
+                    </div>
+                  </TableCell>
                   <TableCell>{formatDuration(event.durationMs)}</TableCell>
                   <TableCell>{event.errorClass ?? "none"}</TableCell>
                 </TableRow>
