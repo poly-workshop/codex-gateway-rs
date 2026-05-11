@@ -59,10 +59,6 @@ import {
 import { cn } from "@/lib/utils"
 
 const numberFormatter = new Intl.NumberFormat("en-US")
-const compactFormatter = new Intl.NumberFormat("en-US", {
-  notation: "compact",
-  maximumFractionDigits: 1,
-})
 const decimalFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 })
@@ -232,6 +228,55 @@ function Dashboard({
   history: HistoryPoint[]
 }) {
   return (
+    <Tabs defaultValue="overview" className="gap-4">
+      <TabsList className="max-w-full flex-wrap justify-start overflow-x-auto rounded-2xl">
+        <TabsTrigger value="overview">Overview</TabsTrigger>
+        <TabsTrigger value="runtime">Runtime</TabsTrigger>
+        <TabsTrigger value="members">Members</TabsTrigger>
+        <TabsTrigger value="config">Config</TabsTrigger>
+      </TabsList>
+      <TabsContent value="overview">
+        <OverviewPanel overview={overview} history={history} />
+      </TabsContent>
+      <TabsContent value="runtime">
+        <RuntimePanel overview={overview} />
+      </TabsContent>
+      <TabsContent value="members">
+        <MembersPanel
+          members={overview.members}
+          limits={overview.config.limits}
+          keys={overview.codexKeys}
+        />
+      </TabsContent>
+      <TabsContent value="config">
+        <ConfigPanel config={overview.config} />
+      </TabsContent>
+    </Tabs>
+  )
+}
+
+function OverviewPanel({
+  overview,
+  history,
+}: {
+  overview: MonitorOverview
+  history: HistoryPoint[]
+}) {
+  const recentErrorCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const event of overview.recentEvents) {
+      if (event.success) {
+        continue
+      }
+      const key = event.errorClass ?? event.statusCode?.toString() ?? "error"
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return Array.from(counts, ([label, value]) => ({ label, value }))
+      .sort((left, right) => right.value - left.value)
+      .slice(0, 8)
+  }, [overview.recentEvents])
+
+  return (
     <div className="flex flex-col gap-6">
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
@@ -281,131 +326,107 @@ function Dashboard({
         />
       </section>
 
-      <MonitorCharts overview={overview} history={history} />
-
-      <Tabs defaultValue="overview" className="gap-4">
-        <TabsList className="max-w-full flex-wrap justify-start overflow-x-auto rounded-2xl">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="members">Members</TabsTrigger>
-          <TabsTrigger value="keys">Keys</TabsTrigger>
-          <TabsTrigger value="upstreams">Upstreams</TabsTrigger>
-          <TabsTrigger value="events">Events</TabsTrigger>
-          <TabsTrigger value="config">Config</TabsTrigger>
-        </TabsList>
-        <TabsContent value="overview">
-          <OverviewPanel overview={overview} />
-        </TabsContent>
-        <TabsContent value="members">
-          <MembersPanel
-            members={overview.members}
-            limits={overview.config.limits}
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+        <LineChartCard
+          title="Live usage"
+          description={`${formatNumber(history.length)} samples retained in this browser`}
+          points={history}
+          series={[
+            { key: "credits", label: "credits" },
+            { key: "requests", label: "requests" },
+            { key: "messages", label: "messages" },
+          ]}
+        />
+        <div className="grid gap-4">
+          <BarChartCard
+            title="Recent failures"
+            description="Last 50 usage events"
+            data={recentErrorCounts}
+            emptyTitle="No recent failures"
+            emptyDescription="Failed events will appear here when recorded."
+            valueFormatter={formatNumber}
           />
-        </TabsContent>
-        <TabsContent value="keys">
-          <CodexKeysTable keys={overview.codexKeys} />
-        </TabsContent>
-        <TabsContent value="upstreams">
-          <UpstreamsTable upstreams={overview.upstreams} />
-        </TabsContent>
-        <TabsContent value="events">
-          <EventsTable events={overview.recentEvents} />
-        </TabsContent>
-        <TabsContent value="config">
-          <ConfigPanel config={overview.config} />
-        </TabsContent>
-      </Tabs>
+          <OverviewUpstreamHealthCard overview={overview} />
+        </div>
+      </section>
     </div>
   )
 }
 
-function OverviewPanel({ overview }: { overview: MonitorOverview }) {
-  const topMembers = useMemo(
-    () => overview.members.slice(0, 5),
-    [overview.members]
-  )
-  const topUpstreams = useMemo(
-    () => overview.upstreams.slice(0, 5),
+function OverviewUpstreamHealthCard({
+  overview,
+}: {
+  overview: MonitorOverview
+}) {
+  const cooldownCount = useMemo(
+    () => overview.upstreams.filter((upstream) => upstream.cooldownUntil).length,
     [overview.upstreams]
   )
-  const maxMemberCredits = Math.max(
-    ...topMembers.map((member) => member.credits),
-    1
+  const failureCount = useMemo(
+    () => overview.recentEvents.filter((event) => !event.success).length,
+    [overview.recentEvents]
+  )
+  const busiestUpstreams = useMemo(
+    () =>
+      [...overview.upstreams]
+        .sort(
+          (left, right) =>
+            ratio(
+              right.currentConcurrentRequests,
+              right.maxConcurrentRequests
+            ) -
+            ratio(left.currentConcurrentRequests, left.maxConcurrentRequests)
+        )
+        .slice(0, 3),
+    [overview.upstreams]
   )
 
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <Card>
-        <CardHeader>
-          <CardTitle>Member usage</CardTitle>
-          <CardDescription>Highest Codex credit usage today</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {topMembers.length ? (
-            <div className="flex flex-col gap-4">
-              {topMembers.map((member) => (
-                <UsageRow
-                  key={member.id}
-                  label={member.name}
-                  meta={`${formatNumber(member.requestCount)} requests`}
-                  value={member.credits}
-                  ratio={ratio(member.credits, maxMemberCredits)}
-                />
-              ))}
+    <Card>
+      <CardHeader>
+        <CardTitle>Upstream health</CardTitle>
+        <CardDescription>Routing snapshot across configured upstream keys</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {overview.upstreams.length ? (
+          <div className="flex flex-col gap-4">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <CompactStat
+                label="Healthy"
+                value={`${formatNumber(overview.summary.healthyUpstreamKeyCount)}/${formatNumber(overview.summary.upstreamKeyCount)}`}
+                meta={`${formatNumber(overview.summary.activeUpstreamKeyCount)} active`}
+              />
+              <CompactStat
+                label="Cooldowns"
+                value={formatNumber(cooldownCount)}
+                meta="Currently rate-limited"
+              />
+              <CompactStat
+                label="Recent failures"
+                value={formatNumber(failureCount)}
+                meta="Within last 50 events"
+              />
             </div>
-          ) : (
-            <EmptyState
-              icon={UserGroupIcon}
-              title="No members"
-              description="Create members with the admin CLI to start tracking usage."
-            />
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Upstream capacity</CardTitle>
-          <CardDescription>Current concurrency and health state</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {topUpstreams.length ? (
+            <Separator />
             <div className="flex flex-col gap-4">
-              {topUpstreams.map((upstream) => (
+              {busiestUpstreams.map((upstream) => (
                 <CapacityRow key={upstream.id} upstream={upstream} />
               ))}
             </div>
-          ) : (
-            <EmptyState
-              icon={ServerStack01Icon}
-              title="No upstream keys"
-              description="Add a legitimate upstream API key before serving traffic."
-            />
-          )}
-        </CardContent>
-      </Card>
-    </div>
+          </div>
+        ) : (
+          <EmptyState
+            icon={ServerStack01Icon}
+            title="No upstream keys"
+            description="Add a legitimate upstream API key before serving traffic."
+          />
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
-function MonitorCharts({
-  overview,
-  history,
-}: {
-  overview: MonitorOverview
-  history: HistoryPoint[]
-}) {
-  const memberCredits = useMemo(
-    () =>
-      overview.members
-        .filter((member) => member.credits > 0)
-        .sort((left, right) => right.credits - left.credits)
-        .slice(0, 8)
-        .map((member) => ({
-          label: member.name,
-          value: member.credits,
-        })),
-    [overview.members]
-  )
+function RuntimePanel({ overview }: { overview: MonitorOverview }) {
   const upstreamLoad = useMemo(
     () =>
       [...overview.upstreams]
@@ -438,53 +459,86 @@ function MonitorCharts({
       .sort((left, right) => right.value - left.value)
       .slice(0, 8)
   }, [overview.recentEvents])
+  const totalUpstreamSlots = useMemo(
+    () =>
+      overview.upstreams.reduce(
+        (total, upstream) => total + upstream.maxConcurrentRequests,
+        0
+      ),
+    [overview.upstreams]
+  )
+  const currentUpstreamLoad = useMemo(
+    () =>
+      overview.upstreams.reduce(
+        (total, upstream) => total + upstream.currentConcurrentRequests,
+        0
+      ),
+    [overview.upstreams]
+  )
+  const recentFailureCount = useMemo(
+    () => overview.recentEvents.filter((event) => !event.success).length,
+    [overview.recentEvents]
+  )
 
   return (
-    <section className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
-      <LineChartCard
-        title="Live usage"
-        description={`${formatNumber(history.length)} samples retained in this browser`}
-        points={history}
-        series={[
-          { key: "credits", label: "credits" },
-          { key: "requests", label: "requests" },
-          { key: "messages", label: "messages" },
-        ]}
-      />
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
-        <BarChartCard
-          title="Member credits"
-          description="Top members today"
-          data={memberCredits}
-          emptyTitle="No member usage"
-          emptyDescription="Credits will appear after requests finish."
-          valueFormatter={formatCredits}
+    <div className="flex flex-col gap-4">
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <StatusCard
+          title="Healthy upstreams"
+          active={overview.summary.healthyUpstreamKeyCount}
+          total={overview.summary.upstreamKeyCount}
+          icon={ServerStack01Icon}
         />
+        <LimitLoadCard
+          title="Current upstream load"
+          current={currentUpstreamLoad}
+          max={totalUpstreamSlots}
+          icon={Activity01Icon}
+        />
+        <MetricCard
+          title="Recent failures"
+          value={formatNumber(recentFailureCount)}
+          description="Within last 50 usage events"
+          icon={AlertCircleIcon}
+        />
+        <MetricCard
+          title="WebSocket connections"
+          value={formatNumber(overview.summary.wsConnectionCount)}
+          description="Currently recorded today"
+          icon={MessageMultiple01Icon}
+        />
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
         <CapacityChartCard
           title="Upstream load"
           description="Current concurrent requests"
           data={upstreamLoad}
         />
-      </div>
-      <BarChartCard
-        title="Recent failures"
-        description="Last 50 usage events"
-        data={recentErrorCounts}
-        emptyTitle="No recent failures"
-        emptyDescription="Failed events will appear here when recorded."
-        valueFormatter={formatNumber}
-      />
-      <QuotaPressureCard members={overview.members} />
-    </section>
+        <BarChartCard
+          title="Failure classes"
+          description="Last 50 usage events"
+          data={recentErrorCounts}
+          emptyTitle="No recent failures"
+          emptyDescription="Failed events will appear here when recorded."
+          valueFormatter={formatNumber}
+        />
+      </section>
+
+      <UpstreamsTable upstreams={overview.upstreams} />
+      <EventsTable events={overview.recentEvents} />
+    </div>
   )
 }
 
 function MembersPanel({
   members,
   limits,
+  keys,
 }: {
   members: MemberOverview[]
   limits: ConfigOverview["limits"]
+  keys: CodexKeyOverview[]
 }) {
   const activeMembers = members.filter((member) => member.status === "active")
   const totalMemberSlots = members.reduce(
@@ -531,21 +585,18 @@ function MembersPanel({
         />
       </section>
 
+      <QuotaPressureCard members={members} />
+      <MembersTable members={members} />
+
       {members.length ? (
         <section className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
           {members.map((member) => (
             <MemberLimitCard key={member.id} member={member} />
           ))}
         </section>
-      ) : (
-        <EmptyState
-          icon={UserGroupIcon}
-          title="No members"
-          description="Members will appear here after they are created."
-        />
-      )}
+      ) : null}
 
-      <MembersTable members={members} />
+      <CodexKeysTable keys={keys} />
     </div>
   )
 }
@@ -897,76 +948,86 @@ function EventsTable({ events }: { events: UsageEventOverview[] }) {
 
 function ConfigPanel({ config }: { config: ConfigOverview }) {
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <ConfigCard
-        title="Server"
-        icon={ApiGatewayIcon}
-        rows={[["Bind address", config.server.bindAddr]]}
-      />
-      <ConfigCard
-        title="Upstream"
-        icon={ServerStack01Icon}
-        rows={[
-          ["HTTP base URL", config.upstream.httpBaseUrl],
-          ["WS base URL", config.upstream.wsBaseUrl],
-          ["Timeout", `${config.upstream.timeoutSecs}s`],
-          ["Retry attempts", formatNumber(config.upstream.retryAttempts)],
-          ["Cooldown", `${config.upstream.cooldownSecs}s`],
-          [
-            "Failure threshold",
-            formatNumber(config.upstream.maxFailuresBeforeCooldown),
-          ],
-        ]}
-      />
-      <ConfigCard
-        title="Credit accounting"
-        icon={TokenCircleIcon}
-        rows={[
-          ["Mode", config.credit.accounting],
-          [
-            "Unknown model credits",
-            formatCredits(config.credit.unknownModelMessageCredits),
-          ],
-          [
-            "Unknown usage credits",
-            formatCredits(config.credit.unknownUsageCredits),
-          ],
-        ]}
-      />
-      <ConfigCard
-        title="Limits"
-        icon={Configuration01Icon}
-        rows={[
-          [
-            "Default member concurrency",
-            formatNumber(config.limits.defaultMemberConcurrency),
-          ],
-          [
-            "Default member 5h quota",
-            formatQuota(config.limits.defaultMember5hQuota),
-          ],
-          [
-            "Default member weekly quota",
-            formatQuota(config.limits.defaultMemberWeeklyQuota),
-          ],
-          [
-            "Default upstream concurrency",
-            formatNumber(config.limits.defaultUpstreamConcurrency),
-          ],
-          ["WS idle timeout", `${config.limits.wsIdleTimeoutSecs}s`],
-          [
-            "WS upstream ping",
-            config.limits.wsUpstreamPingIntervalSecs
-              ? `${config.limits.wsUpstreamPingIntervalSecs}s`
-              : "disabled",
-          ],
-          ["WS max connection", `${config.limits.wsMaxConnectionSecs}s`],
-          [
-            "WS max messages",
-            formatNumber(config.limits.wsMaxMessagesPerConnection),
-          ],
-        ]}
-      />
+    <div className="flex flex-col gap-4">
+      <Card size="sm">
+        <CardHeader>
+          <CardTitle>Configuration snapshot</CardTitle>
+          <CardDescription>
+            Static configuration values loaded by the gateway. Runtime health and traffic stay in the Runtime menu.
+          </CardDescription>
+        </CardHeader>
+      </Card>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <ConfigCard
+          title="Server"
+          icon={ApiGatewayIcon}
+          rows={[["Bind address", config.server.bindAddr]]}
+        />
+        <ConfigCard
+          title="Upstream"
+          icon={ServerStack01Icon}
+          rows={[
+            ["HTTP base URL", config.upstream.httpBaseUrl],
+            ["WS base URL", config.upstream.wsBaseUrl],
+            ["Timeout", `${config.upstream.timeoutSecs}s`],
+            ["Retry attempts", formatNumber(config.upstream.retryAttempts)],
+            ["Cooldown", `${config.upstream.cooldownSecs}s`],
+            [
+              "Failure threshold",
+              formatNumber(config.upstream.maxFailuresBeforeCooldown),
+            ],
+          ]}
+        />
+        <ConfigCard
+          title="Credit accounting"
+          icon={TokenCircleIcon}
+          rows={[
+            ["Mode", config.credit.accounting],
+            [
+              "Unknown model credits",
+              formatCredits(config.credit.unknownModelMessageCredits),
+            ],
+            [
+              "Unknown usage credits",
+              formatCredits(config.credit.unknownUsageCredits),
+            ],
+          ]}
+        />
+        <ConfigCard
+          title="Limits"
+          icon={Configuration01Icon}
+          rows={[
+            [
+              "Default member concurrency",
+              formatNumber(config.limits.defaultMemberConcurrency),
+            ],
+            [
+              "Default member 5h quota",
+              formatQuota(config.limits.defaultMember5hQuota),
+            ],
+            [
+              "Default member weekly quota",
+              formatQuota(config.limits.defaultMemberWeeklyQuota),
+            ],
+            [
+              "Default upstream concurrency",
+              formatNumber(config.limits.defaultUpstreamConcurrency),
+            ],
+            ["WS idle timeout", `${config.limits.wsIdleTimeoutSecs}s`],
+            [
+              "WS upstream ping",
+              config.limits.wsUpstreamPingIntervalSecs
+                ? `${config.limits.wsUpstreamPingIntervalSecs}s`
+                : "disabled",
+            ],
+            ["WS max connection", `${config.limits.wsMaxConnectionSecs}s`],
+            [
+              "WS max messages",
+              formatNumber(config.limits.wsMaxMessagesPerConnection),
+            ],
+          ]}
+        />
+      </div>
     </div>
   )
 }
@@ -1364,6 +1425,24 @@ function LimitLoadCard({
   )
 }
 
+function CompactStat({
+  label,
+  value,
+  meta,
+}: {
+  label: string
+  value: string
+  meta: string
+}) {
+  return (
+    <div className="rounded-xl border bg-muted/30 p-3">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-2 font-mono text-lg font-medium">{value}</div>
+      <div className="mt-1 text-xs text-muted-foreground">{meta}</div>
+    </div>
+  )
+}
+
 function LimitDetailRow({
   label,
   value,
@@ -1450,31 +1529,6 @@ function StatusCard({
         />
       </CardContent>
     </Card>
-  )
-}
-
-function UsageRow({
-  label,
-  meta,
-  value,
-  ratio,
-}: {
-  label: string
-  meta: string
-  value: number
-  ratio: number
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate font-medium">{label}</div>
-          <div className="text-xs text-muted-foreground">{meta}</div>
-        </div>
-        <div className="shrink-0 font-mono text-sm">{formatCompact(value)}</div>
-      </div>
-      <Progress value={toPercentValue(ratio)} aria-label={`${label} usage`} />
-    </div>
   )
 }
 
@@ -1625,10 +1679,6 @@ function toPercentValue(value: number) {
 
 function formatNumber(value: number) {
   return numberFormatter.format(value)
-}
-
-function formatCompact(value: number) {
-  return compactFormatter.format(value)
 }
 
 function formatDecimal(value: number) {
