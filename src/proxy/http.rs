@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use axum::{
-    Json,
+    body::Bytes,
     extract::State,
     http::{HeaderMap, Method, Uri},
     response::Response,
@@ -29,10 +29,11 @@ pub async fn http_proxy(
     auth: AuthContext,
     uri: Uri,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Bytes,
 ) -> Result<Response> {
     let start = Instant::now();
     let path = uri.path().to_string();
+    let body = parse_json_body(&body)?;
     let model = model_from_uri(&uri).or_else(|| meter::extract_model(&body));
     let cost_weight = 1.0;
     let session_id = session_id(&headers);
@@ -172,6 +173,12 @@ async fn mark_failure(state: &AppState, upstream_id: i64, reason: &str) {
     }
 }
 
+fn parse_json_body(body: &[u8]) -> Result<Value> {
+    serde_json::from_slice(body).map_err(|error| {
+        AppError::InvalidRequest(format!("request body must be valid JSON: {error}"))
+    })
+}
+
 fn model_from_uri(uri: &Uri) -> Option<String> {
     url::form_urlencoded::parse(uri.query()?.as_bytes()).find_map(|(key, value)| {
         if key == "model" {
@@ -203,5 +210,22 @@ mod tests {
         let uri = Uri::from_static("/v1/responses?model=");
 
         assert_eq!(model_from_uri(&uri), None);
+    }
+
+    #[test]
+    fn parses_json_body_without_requiring_content_type() {
+        let body = br#"{"model":"gpt-5-codex"}"#;
+
+        assert_eq!(
+            meter::extract_model(&parse_json_body(body).unwrap()),
+            Some("gpt-5-codex".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_json_body() {
+        let error = parse_json_body(b"not json").unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidRequest(_)));
     }
 }

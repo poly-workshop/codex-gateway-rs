@@ -12,7 +12,7 @@ pub fn session_id(headers: &HeaderMap) -> Option<String> {
 pub fn should_forward_request_header(name: &HeaderName) -> bool {
     !matches!(
         name.as_str(),
-        "authorization" | "host" | "content-length" | "connection"
+        "authorization" | "host" | "content-length" | "content-type" | "connection"
     )
 }
 
@@ -21,4 +21,16 @@ pub fn should_forward_response_header(name: &HeaderName) -> bool {
         name.as_str(),
         "content-length" | "connection" | "transfer-encoding"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::header;
+
+    use super::*;
+
+    #[test]
+    fn request_content_type_is_not_forwarded() {
+        assert!(!should_forward_request_header(&header::CONTENT_TYPE));
+    }
 }

@@ -16,6 +16,8 @@ pub enum AppError {
     ConcurrencyLimitExceeded,
     #[error("member {window} quota exceeded")]
     MemberWindowQuotaExceeded { window: &'static str },
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     #[error("Codex Gateway only accepts Codex traffic")]
     CodexOnly,
     #[error("no upstream key is available")]
@@ -44,6 +46,7 @@ impl AppError {
         match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::CodexOnly => StatusCode::FORBIDDEN,
             Self::ConcurrencyLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             Self::MemberWindowQuotaExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -56,6 +59,7 @@ impl AppError {
     fn error_type(&self) -> &'static str {
         match self {
             Self::Unauthorized => "authentication_error",
+            Self::InvalidRequest(_) => "invalid_request_error",
             Self::Forbidden(_) | Self::CodexOnly => "permission_error",
             Self::ConcurrencyLimitExceeded | Self::MemberWindowQuotaExceeded { .. } => {
                 "rate_limit_error"
@@ -68,6 +72,7 @@ impl AppError {
     fn code(&self) -> &'static str {
         match self {
             Self::Unauthorized => "unauthorized",
+            Self::InvalidRequest(_) => "invalid_request",
             Self::Forbidden(_) => "forbidden",
             Self::CodexOnly => "codex_only",
             Self::ConcurrencyLimitExceeded => "concurrency_limit_exceeded",
