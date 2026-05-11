@@ -76,26 +76,47 @@ type LoadState = {
   error: string | null
 }
 
+type HistoryPoint = {
+  generatedAt: string
+  credits: number
+  requests: number
+  messages: number
+  wsConnections: number
+  healthyUpstreams: number
+}
+
 export function App() {
   const [state, setState] = useState<LoadState>({
     loading: true,
     data: null,
     error: null,
   })
+  const [history, setHistory] = useState<HistoryPoint[]>([])
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [refreshIntervalMs, setRefreshIntervalMs] = useState(30_000)
 
-  const load = useCallback((signal?: AbortSignal) => {
-    setState((current) => ({
-      loading: true,
-      data: current.data,
-      error: null,
-    }))
+  const acceptOverview = useCallback((data: MonitorOverview) => {
+    setState({ loading: false, data, error: null })
+    setHistory((current) => {
+      const point: HistoryPoint = {
+        generatedAt: data.generatedAt,
+        credits: data.summary.credits,
+        requests: data.summary.requestCount,
+        messages: data.summary.messageCount,
+        wsConnections: data.summary.wsConnectionCount,
+        healthyUpstreams: data.summary.healthyUpstreamKeyCount,
+      }
+      const next =
+        current.at(-1)?.generatedAt === point.generatedAt
+          ? [...current.slice(0, -1), point]
+          : [...current, point]
+      return next.slice(-40)
+    })
+  }, [])
 
-    fetchMonitorOverview(signal)
-      .then((data) => {
-        setState({ loading: false, data, error: null })
-      })
+  const fetchAndAccept = useCallback((signal?: AbortSignal) => {
+    return fetchMonitorOverview(signal)
+      .then(acceptOverview)
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") {
           return
@@ -107,27 +128,23 @@ export function App() {
           error: error instanceof Error ? error.message : "Failed to load monitor data",
         }))
       })
-  }, [])
+  }, [acceptOverview])
+
+  const load = useCallback((signal?: AbortSignal) => {
+    setState((current) => ({
+      loading: true,
+      data: current.data,
+      error: null,
+    }))
+
+    fetchAndAccept(signal)
+  }, [fetchAndAccept])
 
   useEffect(() => {
     const controller = new AbortController()
-    fetchMonitorOverview(controller.signal)
-      .then((data) => {
-        setState({ loading: false, data, error: null })
-      })
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          return
-        }
-
-        setState({
-          loading: false,
-          data: null,
-          error: error instanceof Error ? error.message : "Failed to load monitor data",
-        })
-      })
+    fetchAndAccept(controller.signal)
     return () => controller.abort()
-  }, [])
+  }, [fetchAndAccept])
 
   useEffect(() => {
     if (!autoRefresh) {
@@ -136,25 +153,11 @@ export function App() {
 
     const interval = window.setInterval(() => {
       const controller = new AbortController()
-      fetchMonitorOverview(controller.signal)
-        .then((data) => {
-          setState({ loading: false, data, error: null })
-        })
-        .catch((error: unknown) => {
-          if (error instanceof DOMException && error.name === "AbortError") {
-            return
-          }
-
-          setState((current) => ({
-            loading: false,
-            data: current.data,
-            error: error instanceof Error ? error.message : "Failed to load monitor data",
-          }))
-        })
+      fetchAndAccept(controller.signal)
     }, refreshIntervalMs)
 
     return () => window.clearInterval(interval)
-  }, [autoRefresh, refreshIntervalMs])
+  }, [autoRefresh, fetchAndAccept, refreshIntervalMs])
 
   const overview = state.data
 
@@ -211,13 +214,23 @@ export function App() {
           </Alert>
         ) : null}
 
-        {overview ? <Dashboard overview={overview} /> : <DashboardSkeleton />}
+        {overview ? (
+          <Dashboard overview={overview} history={history} />
+        ) : (
+          <DashboardSkeleton />
+        )}
       </main>
     </div>
   )
 }
 
-function Dashboard({ overview }: { overview: MonitorOverview }) {
+function Dashboard({
+  overview,
+  history,
+}: {
+  overview: MonitorOverview
+  history: HistoryPoint[]
+}) {
   return (
     <div className="flex flex-col gap-6">
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -267,6 +280,8 @@ function Dashboard({ overview }: { overview: MonitorOverview }) {
           icon={ServerStack01Icon}
         />
       </section>
+
+      <MonitorCharts overview={overview} history={history} />
 
       <Tabs defaultValue="overview" className="gap-4">
         <TabsList className="max-w-full flex-wrap justify-start overflow-x-auto rounded-2xl">
@@ -322,7 +337,7 @@ function OverviewPanel({ overview }: { overview: MonitorOverview }) {
       <Card>
         <CardHeader>
           <CardTitle>Member usage</CardTitle>
-          <CardDescription>Highest Codex token usage today</CardDescription>
+          <CardDescription>Highest Codex credit usage today</CardDescription>
         </CardHeader>
         <CardContent>
           {topMembers.length ? (
@@ -369,6 +384,98 @@ function OverviewPanel({ overview }: { overview: MonitorOverview }) {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+function MonitorCharts({
+  overview,
+  history,
+}: {
+  overview: MonitorOverview
+  history: HistoryPoint[]
+}) {
+  const memberCredits = useMemo(
+    () =>
+      overview.members
+        .filter((member) => member.credits > 0)
+        .sort((left, right) => right.credits - left.credits)
+        .slice(0, 8)
+        .map((member) => ({
+          label: member.name,
+          value: member.credits,
+        })),
+    [overview.members]
+  )
+  const upstreamLoad = useMemo(
+    () =>
+      [...overview.upstreams]
+        .sort(
+          (left, right) =>
+            ratio(
+              right.currentConcurrentRequests,
+              right.maxConcurrentRequests
+            ) -
+            ratio(left.currentConcurrentRequests, left.maxConcurrentRequests)
+        )
+        .slice(0, 8)
+        .map((upstream) => ({
+          label: upstream.name,
+          value: upstream.currentConcurrentRequests,
+          max: upstream.maxConcurrentRequests,
+        })),
+    [overview.upstreams]
+  )
+  const recentErrorCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const event of overview.recentEvents) {
+      if (event.success) {
+        continue
+      }
+      const key = event.errorClass ?? event.statusCode?.toString() ?? "error"
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return Array.from(counts, ([label, value]) => ({ label, value }))
+      .sort((left, right) => right.value - left.value)
+      .slice(0, 8)
+  }, [overview.recentEvents])
+
+  return (
+    <section className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+      <LineChartCard
+        title="Live usage"
+        description={`${formatNumber(history.length)} samples retained in this browser`}
+        points={history}
+        series={[
+          { key: "credits", label: "credits" },
+          { key: "requests", label: "requests" },
+          { key: "messages", label: "messages" },
+        ]}
+      />
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
+        <BarChartCard
+          title="Member credits"
+          description="Top members today"
+          data={memberCredits}
+          emptyTitle="No member usage"
+          emptyDescription="Credits will appear after requests finish."
+          valueFormatter={formatCredits}
+        />
+        <CapacityChartCard
+          title="Upstream load"
+          description="Current concurrent requests"
+          data={upstreamLoad}
+        />
+      </div>
+      <BarChartCard
+        title="Recent failures"
+        description="Last 50 usage events"
+        data={recentErrorCounts}
+        emptyTitle="No recent failures"
+        emptyDescription="Failed events will appear here when recorded."
+        valueFormatter={formatNumber}
+      />
+      <QuotaPressureCard members={overview.members} />
+    </section>
   )
 }
 
@@ -913,6 +1020,305 @@ function MetricCard({
         <div className="text-3xl font-medium">{value}</div>
       </CardContent>
     </Card>
+  )
+}
+
+type ChartSeries = {
+  key: keyof Omit<HistoryPoint, "generatedAt">
+  label: string
+}
+
+function LineChartCard({
+  title,
+  description,
+  points,
+  series,
+}: {
+  title: string
+  description: string
+  points: HistoryPoint[]
+  series: ChartSeries[]
+}) {
+  const chartPoints = points.length ? points : []
+  const maxValue = Math.max(
+    ...chartPoints.flatMap((point) =>
+      series.map((item) => Number(point[item.key]) || 0)
+    ),
+    1
+  )
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="h-72 min-w-0">
+          {chartPoints.length > 1 ? (
+            <svg
+              viewBox="0 0 720 260"
+              role="img"
+              aria-label={`${title} chart`}
+              className="size-full overflow-visible"
+              preserveAspectRatio="none"
+            >
+              <ChartGrid />
+              {series.map((item, index) => (
+                <polyline
+                  key={item.key}
+                  fill="none"
+                  stroke={chartStroke(index)}
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  points={polylinePoints(chartPoints, item.key, maxValue)}
+                />
+              ))}
+            </svg>
+          ) : (
+            <EmptyState
+              icon={Activity01Icon}
+              title="Collecting samples"
+              description="Auto refresh will populate this chart."
+            />
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {series.map((item, index) => (
+            <Badge key={item.key} variant="secondary">
+              <span
+                className="size-2 rounded-full"
+                style={{ backgroundColor: chartStroke(index) }}
+              />
+              {item.label}
+            </Badge>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function BarChartCard({
+  title,
+  description,
+  data,
+  emptyTitle,
+  emptyDescription,
+  valueFormatter,
+}: {
+  title: string
+  description: string
+  data: Array<{ label: string; value: number }>
+  emptyTitle: string
+  emptyDescription: string
+  valueFormatter: (value: number) => string
+}) {
+  const maxValue = Math.max(...data.map((item) => item.value), 1)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data.length ? (
+          <div className="flex flex-col gap-3">
+            {data.map((item) => (
+              <ChartBarRow
+                key={item.label}
+                label={item.label}
+                value={item.value}
+                max={maxValue}
+                valueFormatter={valueFormatter}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            icon={Database01Icon}
+            title={emptyTitle}
+            description={emptyDescription}
+          />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function CapacityChartCard({
+  title,
+  description,
+  data,
+}: {
+  title: string
+  description: string
+  data: Array<{ label: string; value: number; max: number }>
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data.length ? (
+          <div className="flex flex-col gap-3">
+            {data.map((item) => (
+              <ChartBarRow
+                key={item.label}
+                label={item.label}
+                value={item.value}
+                max={item.max || 1}
+                valueFormatter={(value) =>
+                  `${formatNumber(value)}/${formatNumber(item.max)}`
+                }
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            icon={ServerStack01Icon}
+            title="No upstreams"
+            description="Upstream load appears after keys are configured."
+          />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function QuotaPressureCard({ members }: { members: MemberOverview[] }) {
+  const quotaMembers = members
+    .filter((member) => member.fiveHourQuota > 0 || member.weeklyQuota > 0)
+    .sort((left, right) => memberQuotaPressure(right) - memberQuotaPressure(left))
+    .slice(0, 12)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Member quota pressure</CardTitle>
+        <CardDescription>Highest 5h and weekly credit window usage</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {quotaMembers.length ? (
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {quotaMembers.map((member) => (
+              <div key={member.id} className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="truncate text-sm font-medium">{member.name}</span>
+                  <StatusBadge status={member.status} />
+                </div>
+                <MiniQuota
+                  label="5h"
+                  used={member.fiveHourUsage.credits}
+                  quota={member.fiveHourQuota}
+                />
+                <MiniQuota
+                  label="7d"
+                  used={member.weeklyUsage.credits}
+                  quota={member.weeklyQuota}
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            icon={UserGroupIcon}
+            title="No configured quotas"
+            description="Configure member credit quotas to see pressure here."
+          />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function ChartBarRow({
+  label,
+  value,
+  max,
+  valueFormatter,
+}: {
+  label: string
+  value: number
+  max: number
+  valueFormatter: (value: number) => string
+}) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-[minmax(0,0.8fr)_minmax(0,1.5fr)_auto] sm:items-center">
+      <div className="truncate text-sm font-medium">{label}</div>
+      <Progress
+        value={toPercentValue(ratio(value, max))}
+        aria-label={`${label} chart value`}
+      />
+      <div className="shrink-0 text-right font-mono text-sm">
+        {valueFormatter(value)}
+      </div>
+    </div>
+  )
+}
+
+function MiniQuota({
+  label,
+  used,
+  quota,
+}: {
+  label: string
+  used: number
+  quota: number
+}) {
+  return (
+    <div className="grid grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <Progress
+        value={quota > 0 ? toPercentValue(ratio(used, quota)) : 0}
+        aria-label={`${label} quota`}
+      />
+      <div className="font-mono text-xs">{formatWindowUsage(used, quota)}</div>
+    </div>
+  )
+}
+
+function ChartGrid() {
+  return (
+    <g stroke="currentColor" className="text-border">
+      {[0, 1, 2, 3, 4].map((index) => {
+        const y = 20 + index * 55
+        return <line key={index} x1="24" x2="700" y1={y} y2={y} strokeWidth="1" />
+      })}
+    </g>
+  )
+}
+
+function polylinePoints(
+  points: HistoryPoint[],
+  key: keyof Omit<HistoryPoint, "generatedAt">,
+  maxValue: number
+) {
+  return points
+    .map((point, index) => {
+      const x = 24 + (index / Math.max(points.length - 1, 1)) * 676
+      const y = 240 - ratio(Number(point[key]) || 0, maxValue) * 220
+      return `${x.toFixed(2)},${y.toFixed(2)}`
+    })
+    .join(" ")
+}
+
+function chartStroke(index: number) {
+  return ["var(--chart-1)", "var(--chart-3)", "var(--primary)"][index % 3]
+}
+
+function memberQuotaPressure(member: MemberOverview) {
+  return Math.max(
+    member.fiveHourQuota > 0
+      ? ratio(member.fiveHourUsage.credits, member.fiveHourQuota)
+      : 0,
+    member.weeklyQuota > 0
+      ? ratio(member.weeklyUsage.credits, member.weeklyQuota)
+      : 0
   )
 }
 
