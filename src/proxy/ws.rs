@@ -107,8 +107,10 @@ async fn handle_ws(
 ) {
     let started = Instant::now();
     let upstream_id = lease.upstream().id;
-    let mut usage = meter::TokenUsage::default();
-    let mut message_count = 0_i64;
+    let mut exact_usage = meter::TokenUsage::default();
+    let mut estimated_usage = meter::TokenUsage::default();
+    let mut client_message_count = 0_i64;
+    let mut upstream_message_count = 0_i64;
 
     let upstream_url = match build_ws_url(&state.config, &path, model.as_deref()) {
         Ok(url) => url,
@@ -179,7 +181,7 @@ async fn handle_ws(
                 .await;
             break "max_connection_duration".to_string();
         }
-        if message_count >= max_messages {
+        if client_message_count >= max_messages {
             let _ = client_tx
                 .send(Message::Close(Some(CloseFrame {
                     code: axum::extract::ws::close_code::POLICY,
@@ -209,11 +211,17 @@ async fn handle_ws(
 
         match next {
             Ok(WsEvent::Client(Some(Ok(message)))) => {
-                message_count += 1;
+                client_message_count += 1;
                 if model.is_none()
                     && let Message::Text(text) = &message
                 {
                     model = meter::extract_model_from_ws_text(text);
+                }
+                if let Message::Text(text) = &message {
+                    meter::merge_usage(
+                        &mut estimated_usage,
+                        meter::estimate_ws_text_usage(text, meter::WsMessageSide::Client),
+                    );
                 }
                 match axum_to_tungstenite(message) {
                     Some(tungstenite::Message::Close(frame)) => {
@@ -229,14 +237,27 @@ async fn handle_ws(
                 }
             }
             Ok(WsEvent::Client(Some(Err(error)))) => {
+                let _ = upstream_tx.send(tungstenite_close("client reset")).await;
+                if is_unclean_client_ws_reset(&error) {
+                    break "client_reset".to_string();
+                }
                 break format!("client_error:{error}");
             }
             Ok(WsEvent::Client(None)) => {
                 break "client_closed".to_string();
             }
             Ok(WsEvent::Upstream(Some(Ok(message)))) => {
+                upstream_message_count += 1;
                 if let tungstenite::Message::Text(text) = &message {
-                    meter::merge_usage(&mut usage, meter::maybe_usage_from_ws_text(text));
+                    let usage = meter::maybe_usage_from_ws_text(text);
+                    if usage.precision == meter::UsagePrecision::Exact {
+                        meter::merge_usage(&mut exact_usage, usage);
+                    } else {
+                        meter::merge_usage(
+                            &mut estimated_usage,
+                            meter::estimate_ws_text_usage(text, meter::WsMessageSide::Upstream),
+                        );
+                    }
                     if model.is_none() {
                         model = meter::extract_model_from_ws_text(text);
                     }
@@ -249,6 +270,9 @@ async fn handle_ws(
                     }
                     Some(message) => {
                         if let Err(error) = client_tx.send(message).await {
+                            if is_unclean_client_ws_reset(&error) {
+                                break "client_reset".to_string();
+                            }
                             break format!("client_send_error:{error}");
                         }
                     }
@@ -291,6 +315,12 @@ async fn handle_ws(
     };
 
     let duration = started.elapsed();
+    let usage = if exact_usage.precision == meter::UsagePrecision::Exact {
+        exact_usage
+    } else {
+        estimated_usage
+    };
+    let message_count = client_message_count + upstream_message_count;
     let event = usage_event(
         &auth,
         UsageInput {
@@ -301,6 +331,7 @@ async fn handle_ws(
             status_code: None,
             success: close_reason == "normal"
                 || close_reason == "client_closed"
+                || close_reason == "client_reset"
                 || close_reason == "upstream_closed"
                 || close_reason == "upstream_reset",
             usage,
@@ -369,10 +400,21 @@ fn is_retryable_ws_connect_error(error: &tungstenite::Error) -> bool {
 fn is_unclean_ws_reset(error: &tungstenite::Error) -> bool {
     matches!(
         error,
-        tungstenite::Error::Protocol(tungstenite::error::ProtocolError::ResetWithoutClosingHandshake)
-            | tungstenite::Error::ConnectionClosed
+        tungstenite::Error::Protocol(
+            tungstenite::error::ProtocolError::ResetWithoutClosingHandshake
+        ) | tungstenite::Error::ConnectionClosed
             | tungstenite::Error::AlreadyClosed
     )
+}
+
+fn is_unclean_client_ws_reset(error: &axum::Error) -> bool {
+    is_unclean_ws_reset_text(&error.to_string())
+}
+
+fn is_unclean_ws_reset_text(message: &str) -> bool {
+    message.contains("Connection reset without closing handshake")
+        || message.contains("ResetWithoutClosingHandshake")
+        || message.contains("connection reset without closing handshake")
 }
 
 fn tungstenite_close(reason: &'static str) -> tungstenite::Message {
@@ -458,5 +500,12 @@ mod tests {
         let error = tungstenite::Error::Http(Box::new(response));
 
         assert!(is_retryable_ws_connect_error(&error));
+    }
+
+    #[test]
+    fn detects_unclean_client_reset_text() {
+        assert!(is_unclean_ws_reset_text(
+            "WebSocket protocol error: Connection reset without closing handshake"
+        ));
     }
 }

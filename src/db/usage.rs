@@ -65,11 +65,7 @@ pub async fn insert_usage_event(pool: &Db, event: &UsageEvent) -> anyhow::Result
     Ok(())
 }
 
-pub async fn member_credits_since(
-    pool: &Db,
-    member_id: i64,
-    window: &str,
-) -> anyhow::Result<f64> {
+pub async fn member_credits_since(pool: &Db, member_id: i64, window: &str) -> anyhow::Result<f64> {
     let total: (Option<f64>,) = sqlx::query_as(
         r#"
         SELECT CAST(COALESCE(SUM(credits), 0.0) AS REAL)

@@ -15,6 +15,7 @@ pub struct TokenUsage {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum UsagePrecision {
     Exact,
+    Estimated,
     #[default]
     Unknown,
 }
@@ -23,9 +24,16 @@ impl UsagePrecision {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Exact => "exact",
+            Self::Estimated => "estimated",
             Self::Unknown => "unknown",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsMessageSide {
+    Client,
+    Upstream,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,7 +162,7 @@ pub fn estimate_credits(
                 * message_average_credits(model, config.unknown_model_message_credits)
         }
         CreditAccounting::Token => {
-            if usage.precision != UsagePrecision::Exact {
+            if usage.precision == UsagePrecision::Unknown {
                 return config.unknown_usage_credits.max(0.0);
             }
             token_credits(model, usage)
@@ -173,7 +181,11 @@ fn message_average_credits(model: Option<&str>, fallback: f64) -> f64 {
         2.0
     } else if model.contains("gpt-5.4") {
         7.0
-    } else if model.contains("gpt-5.3-codex") || model.contains("gpt-5.2") {
+    } else if model.contains("gpt-5.3-codex")
+        || model.contains("gpt-5.2")
+        || model.contains("gpt-5.1-codex")
+        || model.contains("gpt-5-codex")
+    {
         5.0
     } else {
         fallback.max(0.0)
@@ -192,7 +204,7 @@ fn token_credits(model: Option<&str>, usage: &TokenUsage) -> f64 {
 
 fn token_credit_rates(model: Option<&str>) -> (f64, f64, f64) {
     let Some(model) = model.map(str::to_ascii_lowercase) else {
-        return (0.0, 0.0, 0.0);
+        return default_codex_token_credit_rates();
     };
 
     if model.contains("gpt-5.5") {
@@ -201,11 +213,22 @@ fn token_credit_rates(model: Option<&str>) -> (f64, f64, f64) {
         (18.75, 1.875, 113.0)
     } else if model.contains("gpt-5.4") {
         (62.5, 6.25, 375.0)
-    } else if model.contains("gpt-5.3-codex") || model.contains("gpt-5.2") {
+    } else if model.contains("gpt-5.3-codex")
+        || model.contains("gpt-5.2-codex")
+        || model.contains("gpt-5.2")
+    {
         (43.75, 4.375, 350.0)
+    } else if model.contains("gpt-5.1-codex-mini") || model.contains("gpt-5-codex-mini") {
+        (6.25, 0.625, 50.0)
+    } else if model.contains("gpt-5.1-codex") || model.contains("gpt-5-codex") {
+        (31.25, 3.125, 250.0)
     } else {
-        (0.0, 0.0, 0.0)
+        default_codex_token_credit_rates()
     }
+}
+
+fn default_codex_token_credit_rates() -> (f64, f64, f64) {
+    (43.75, 4.375, 350.0)
 }
 
 pub fn maybe_usage_from_ws_text(text: &str) -> TokenUsage {
@@ -227,11 +250,101 @@ pub fn maybe_usage_from_ws_text(text: &str) -> TokenUsage {
 pub fn merge_usage(target: &mut TokenUsage, next: TokenUsage) {
     if next.precision == UsagePrecision::Exact {
         target.precision = UsagePrecision::Exact;
+    } else if target.precision == UsagePrecision::Unknown
+        && next.precision == UsagePrecision::Estimated
+    {
+        target.precision = UsagePrecision::Estimated;
     }
     target.prompt_tokens += next.prompt_tokens;
     target.cached_prompt_tokens += next.cached_prompt_tokens;
     target.completion_tokens += next.completion_tokens;
     target.total_tokens += next.total_tokens;
+}
+
+pub fn estimate_ws_text_usage(text: &str, side: WsMessageSide) -> TokenUsage {
+    let tokens = estimate_ws_text_tokens(text);
+    if tokens <= 0 {
+        return TokenUsage::default();
+    }
+
+    match side {
+        WsMessageSide::Client => TokenUsage {
+            prompt_tokens: tokens,
+            total_tokens: tokens,
+            precision: UsagePrecision::Estimated,
+            ..TokenUsage::default()
+        },
+        WsMessageSide::Upstream => TokenUsage {
+            completion_tokens: tokens,
+            total_tokens: tokens,
+            precision: UsagePrecision::Estimated,
+            ..TokenUsage::default()
+        },
+    }
+}
+
+fn estimate_ws_text_tokens(text: &str) -> i64 {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return rough_text_tokens(text);
+    };
+
+    let mut tokens = 0;
+    collect_metered_text_tokens(&value, None, &mut tokens);
+
+    if tokens > 0 { tokens } else { 0 }
+}
+
+fn collect_metered_text_tokens(value: &Value, key: Option<&str>, total: &mut i64) {
+    match value {
+        Value::String(text) => {
+            if key.is_some_and(is_metered_text_key) {
+                *total += rough_text_tokens(text);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_metered_text_tokens(value, key, total);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                collect_metered_text_tokens(value, Some(key), total);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_metered_text_key(key: &str) -> bool {
+    matches!(
+        key,
+        "arguments"
+            | "content"
+            | "delta"
+            | "input"
+            | "input_text"
+            | "instructions"
+            | "output"
+            | "output_text"
+            | "prompt"
+            | "text"
+            | "transcript"
+    )
+}
+
+fn rough_text_tokens(text: &str) -> i64 {
+    let mut ascii_chars = 0_i64;
+    let mut non_ascii_chars = 0_i64;
+
+    for char in text.chars() {
+        if char.is_ascii() {
+            ascii_chars += 1;
+        } else if !char.is_whitespace() {
+            non_ascii_chars += 1;
+        }
+    }
+
+    ((ascii_chars + 3) / 4 + non_ascii_chars).max(1)
 }
 
 #[cfg(test)]
@@ -278,10 +391,7 @@ mod tests {
         };
         let usage = TokenUsage::default();
 
-        assert_eq!(
-            estimate_credits(Some("gpt-5.5"), &usage, 2, &config),
-            28.0
-        );
+        assert_eq!(estimate_credits(Some("gpt-5.5"), &usage, 2, &config), 28.0);
         assert_eq!(
             estimate_credits(Some("gpt-5.4-mini"), &usage, 3, &config),
             6.0
@@ -306,6 +416,52 @@ mod tests {
             estimate_credits(Some("gpt-5.4-mini"), &usage, 1, &config),
             130.0625
         );
+    }
+
+    #[test]
+    fn estimates_token_credits_for_legacy_codex_model_alias() {
+        let config = CreditConfig {
+            accounting: CreditAccounting::Token,
+            ..CreditConfig::default()
+        };
+        let usage = TokenUsage {
+            prompt_tokens: 1_000_000,
+            completion_tokens: 1_000_000,
+            total_tokens: 2_000_000,
+            precision: UsagePrecision::Estimated,
+            ..TokenUsage::default()
+        };
+
+        assert_eq!(
+            estimate_credits(Some("gpt-5-codex"), &usage, 1, &config),
+            281.25
+        );
+    }
+
+    #[test]
+    fn estimates_ws_text_delta_usage() {
+        let usage = estimate_ws_text_usage(
+            r#"{"type":"response.output_text.delta","delta":"hello world"}"#,
+            WsMessageSide::Upstream,
+        );
+
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 3);
+        assert_eq!(usage.precision, UsagePrecision::Estimated);
+    }
+
+    #[test]
+    fn estimates_client_ws_prompt_usage() {
+        let usage = estimate_ws_text_usage(
+            r#"{"type":"response.create","response":{"instructions":"write a long report"}}"#,
+            WsMessageSide::Client,
+        );
+
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 5);
+        assert_eq!(usage.precision, UsagePrecision::Estimated);
     }
 
     #[test]

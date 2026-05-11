@@ -175,10 +175,7 @@ pub async fn select_upstream(
     Err(AppError::NoUpstream)
 }
 
-async fn enforce_member_window_quotas(
-    pool: &db::Db,
-    auth: &AuthContext,
-) -> Result<(), AppError> {
+async fn enforce_member_window_quotas(pool: &db::Db, auth: &AuthContext) -> Result<(), AppError> {
     if auth.five_hour_quota > 0 {
         let used = db::member_credits_since(pool, auth.member_id, "-5 hours")
             .await
