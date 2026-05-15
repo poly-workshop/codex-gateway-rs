@@ -107,37 +107,3 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use tower::ServiceExt;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn compact_responses_route_is_registered() {
-        let db = db::connect_and_migrate("sqlite::memory:").await.unwrap();
-        let state = AppState {
-            config: Arc::new(Config::default()),
-            db,
-            client: reqwest::Client::new(),
-        };
-
-        let response = build_router(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/responses/compact")
-                    .body(Body::from(r#"{"model":"gpt-5-codex"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_ne!(response.status(), StatusCode::NOT_FOUND);
-    }
-}

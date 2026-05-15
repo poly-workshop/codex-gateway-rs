@@ -4,7 +4,7 @@ Rust gateway for proxying Codex traffic through administrator-managed OpenAI API
 
 ## Scope
 
-- Codex-only HTTP routes: `POST /v1/responses`, plus `POST /v1/chat/completions` for compatible Codex clients
+- Codex-only HTTP routes: `POST /v1/responses`, `POST /v1/responses/compact`, plus `POST /v1/chat/completions` for compatible Codex clients
 - Codex WebSocket routes: `GET /v1/responses?model=...`, plus `GET /v1/realtime?model=...` for compatible clients
 - Member authentication with generated Codex keys
 - SQLite usage accounting with tokens, request count, WS message count, and WS connection count

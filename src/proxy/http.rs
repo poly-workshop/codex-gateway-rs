@@ -213,6 +213,13 @@ mod tests {
     }
 
     #[test]
+    fn extracts_model_from_compact_query_string() {
+        let uri = Uri::from_static("/v1/responses/compact?model=gpt-5-codex");
+
+        assert_eq!(model_from_uri(&uri), Some("gpt-5-codex".to_string()));
+    }
+
+    #[test]
     fn parses_json_body_without_requiring_content_type() {
         let body = br#"{"model":"gpt-5-codex"}"#;
 
