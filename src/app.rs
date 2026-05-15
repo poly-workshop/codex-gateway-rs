@@ -20,6 +20,22 @@ pub struct AppState {
     pub client: reqwest::Client,
 }
 
+fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/monitor/api/overview", get(monitor::overview))
+        .route("/v1/chat/completions", post(proxy::http_proxy))
+        .route(
+            "/v1/responses",
+            post(proxy::http_proxy).get(proxy::ws_proxy),
+        )
+        .route("/v1/responses/compact", post(proxy::http_proxy))
+        .route("/v1/realtime", get(proxy::ws_proxy))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
 pub async fn serve(config: Config, db: db::Db) -> anyhow::Result<()> {
     let timeout = std::time::Duration::from_secs(config.upstream.timeout_secs);
     let client = reqwest::Client::builder()
@@ -39,18 +55,7 @@ pub async fn serve(config: Config, db: db::Db) -> anyhow::Result<()> {
         client,
     };
 
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/monitor/api/overview", get(monitor::overview))
-        .route("/v1/chat/completions", post(proxy::http_proxy))
-        .route(
-            "/v1/responses",
-            post(proxy::http_proxy).get(proxy::ws_proxy),
-        )
-        .route("/v1/realtime", get(proxy::ws_proxy))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let app = build_router(state);
 
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::info!("serving on http://{bind_addr}");
